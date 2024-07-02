@@ -1,0 +1,329 @@
+# Method 1: using the changes of the centre of mass of each whilte point in each frame to determine the displacements. 
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+def cv_show(img,id):
+    cv2.imshow(f'{id}',img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+# 写每一帧图像
+def read_all_frames(video_path):
+    # 创建一个视频捕捉对象
+    cap = cv2.VideoCapture(video_path)
+
+    # 检查视频是否打开成功
+    if not cap.isOpened():
+        print("Error: Could not open video.")
+        return None
+
+    frame_number = 0
+    while True:
+        # 读取一帧
+        ret, frame = cap.read()
+
+        if not ret:
+            break  # 如果没有读取到帧，说明视频结束
+
+        if frame is not None:
+            # 缩小帧
+            frame = cv2.resize(frame,(600,500))
+
+        # 显示当前帧
+        cv2.imshow('Frame', frame)
+
+        # 保存当前帧为图片
+        cv2.imwrite(f'./frame/frame_{frame_number}.png', frame)
+
+        # 更新frame_number
+        frame_number += 1
+
+        # 按下 'q' 键退出
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # 释放视频捕捉对象
+    cap.release()
+    cv2.destroyAllWindows()
+
+    return frame_number-1
+
+
+# video_path = 'record.avi'
+# total_frames = read_all_frames(video_path)
+# if total_frames is not None:
+#     print(f'Total number of frames: {total_frames}')
+total_frames=139
+
+# 对每一帧操作
+def frame_operation(total_frames):
+    each_frame_center=[] # 初始化每一帧中心点合集列表
+    for frame in range(total_frames): # 测试用前几张，实际用total_frames
+        id=f'frame_{frame+1}'
+        img=cv2.imread(f'./frame/{id}.png')
+        cv_show(img,id) # 显示当前操作图像
+
+        # 对图像进行处理
+
+        # 高斯模糊，灰度图，二值化，圆环检测
+        Gaussian= cv2.GaussianBlur(img, (9, 9), 2)
+        gray=cv2.cvtColor(Gaussian,cv2.COLOR_BGR2GRAY)
+        t,binary=cv2.threshold(gray,127,255,cv2.THRESH_BINARY)
+        contours,hierarchy=cv2.findContours(binary,cv2.RETR_LIST,cv2.CHAIN_APPROX_NONE)
+        cv2.drawContours(img, contours, -1, (0, 0, 255), 2)
+
+
+        center=[] # 初始化单独一帧中心集合
+        # 找几何中心
+        for contour in contours:
+            M = cv2.moments(contour)
+            # 如果面积不为0，则算质心
+            if M['m00'] != 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+                center.append((cx,cy)) # 把中心点依次加入此帧中心点合集
+                cv2.circle(img, (cx, cy), 3, (0, 255, 0), -1)
+            else:
+            # 使用边界框的中心作为几何中心
+                x, y, w, h = cv2.boundingRect(contour)
+                cx = x + w // 2
+                cy = y + h // 2
+                center.append((cx, cy))
+                cv2.circle(img, (cx, cy), 3, (0, 255, 0), -1)
+        # print(len(center))
+
+        each_frame_center.append(center)
+
+        # cv_show(img,id)
+
+    return each_frame_center, len(center)
+
+c,l=frame_operation(total_frames)
+print(c) # 中心点坐标
+
+de_c=[]
+for frame in range(total_frames):
+    center=sorted(c[frame], key=lambda x: x[1])
+    # print(center)
+    de_c.append(center)
+# print(de_c)
+origin_c=c[0]
+new_c=c[-1]
+deflection_x=[]
+for i in range(l):
+    deflection_each_x = origin_c[i][0] - new_c[i][0]
+    deflection_x.append(deflection_each_x)
+print(deflection_x) # x轴偏移
+cylinder_y=[]
+for i in range(l):
+    cylinder_each_y=origin_c[i][1]
+    cylinder_y.append(cylinder_each_y)
+print(cylinder_y)
+
+# plt.plot(cylinder_y, deflection_x, label='Line', color='b', marker='o')
+#
+# # 添加标题和标签
+# plt.title('Simple XY Plot')
+# plt.xlabel('cylinder_y')
+# plt.ylabel('deflection_x')
+#
+# # 添加网格
+# plt.grid(True)
+# plt.show()
+
+# Method 2: using LK optical flow. In order to make it more accurate, I obtain all displacement of all points in each contour and calculate and get a the average value for each contour. 
+import cv2
+import numpy as np
+import os
+import math
+
+
+# 加载图像序列（假设图像保存在一个文件夹中，按时间顺序命名）
+def load_images_from_folder(folder):
+    items = os.listdir(folder)
+    files = [item for item in items if os.path.isfile(os.path.join(folder, item))]
+    l=len(files)
+    images = []
+
+    for frame in range(int(l)-1): # 测试用前几张，实际用total_frames
+        id=f'frame_{frame+1}'
+        img=cv2.imread(f'./frame/{id}.png')
+        if img is not None:
+            images.append(img)
+        else:
+            print(f"Failed to load image: {id}.png")
+    return images
+
+
+# 在每个白色图案中选择三个点
+def select_points_in_white_patterns(image, num_points=3):
+    Gaussian = cv2.GaussianBlur(image, (9, 9), 2)
+    gray = cv2.cvtColor(Gaussian, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+
+    # 检测轮廓
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+
+    points = []
+    for cnt in contours:
+        if len(cnt) >= num_points:
+            cnt = cnt.reshape(-1, 2)
+            points.append(cnt)
+            # step = max(1, len(cnt) // num_points)
+            # points.extend(cnt[i] for i in range(0, len(cnt), step)[:num_points])
+
+    return points , len(contours)
+
+
+# 计算光流并显示效果图像
+def calculate_and_show_optical_flow(images):
+    # 参数设置
+    lk_params = dict(winSize=(50, 50),
+                     maxLevel=2,
+                     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.003))
+
+    # 角点检测参数
+    # feature_params = dict(maxCorners=180,
+    #                       qualityLevel=0.1,
+    #                       minDistance=5,
+    #                       blockSize=9)
+
+    # 将图像转换为灰度图
+    gray_images = [cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) for img in images]
+
+    # 初始化光流追踪点
+    initial_points = None ####
+
+    # 创建用于显示光流的掩码图像
+    mask = np.zeros_like(images[0])
+
+    displacement_values = []
+
+    # 创建视频写入对象
+    height, width, layers = images[0].shape
+    video_writer = cv2.VideoWriter('optical_flow_output.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 10, (width, height))
+
+    # 打开文件以写入位移值
+    with open('displacement_values.txt', 'w') as file:
+
+        for i in range(1, len(gray_images)):
+            if initial_points is None:
+                # 在第一帧中选择所有点
+                initial_contours, initial_contoursn = select_points_in_white_patterns(images[0])
+                initial_points = [np.array(cnt, dtype=np.float32).reshape(-1, 1, 2) for cnt in initial_contours]
+                print(f"Frame {i}: Number of contours: {initial_contoursn}")  # 打印轮廓数量
+                continue
+
+            # 在当前帧中选择所有点
+            current_contours, current_contoursn = select_points_in_white_patterns(images[i])
+            current_points = [np.array(cnt, dtype=np.float32).reshape(-1, 1, 2) for cnt in current_contours]
+            print(f"Frame {i}: Number of contours: {current_contoursn}")  # 打印轮廓数量
+
+            # print(initial_points,'......',current_points)
+
+            if current_contoursn != initial_contoursn:
+                print("Number of contours mismatch between frames.")
+                continue
+                # break
+
+            # 绘制轨迹并显示位移值
+            frame_displacements = []
+
+            for idx, (p0_cnt, p1_cnt) in enumerate(zip(initial_points, current_points)):
+                p1, st, err = cv2.calcOpticalFlowPyrLK(gray_images[i - 1], gray_images[i], p0_cnt, None, **lk_params)
+
+                # 选择好的点
+                good_new = p1[st == 1]
+                good_old = p0_cnt[st == 1]
+
+                # 计算并保存当前轮廓的位移值
+                cnt_displacements = []
+                # 绘制轨迹
+                for j, (new, old) in enumerate(zip(good_new, good_old)):
+                    a, b = new.ravel()
+                    c, d = old.ravel()
+
+                    # 计算位移 扩大100倍
+                    x_displacement = (a - c) * 100
+                    y_displacement = (b - d) * 100
+                    displacement = np.sqrt(x_displacement ** 2 + y_displacement ** 2)
+
+                    # 计算与x轴的夹角
+                    angle = math.degrees(math.atan2(y_displacement, x_displacement))
+
+                    cnt_displacements.append((displacement, x_displacement, y_displacement, angle))
+
+                    a, b, c, d = int(a), int(b), int(c), int(d)
+                    mask = cv2.line(mask, (a, b), (c, d), (255, 0, 255), 1)
+                    images[i] = cv2.circle(images[i], (a, b), 2, (255, 255, 0), -1)
+
+                # 保存当前轮廓的位移平均值
+                if cnt_displacements:
+                    avg_displacement = sum(d[0] for d in cnt_displacements) / len(cnt_displacements)
+                    avg_x_displacement = sum(d[1] for d in cnt_displacements) / len(cnt_displacements)
+                    avg_y_displacement = sum(d[2] for d in cnt_displacements) / len(cnt_displacements)
+                    avg_angle = sum(d[3] for d in cnt_displacements) / len(cnt_displacements)
+                    frame_displacements.append((avg_displacement, avg_x_displacement, avg_y_displacement, avg_angle))
+
+                # 计算每个轮廓的质心
+                M = cv2.moments(current_contours[idx])
+                if M['m00'] != 0:
+                    cx = int(M['m10'] / M['m00'])
+                    cy = int(M['m01'] / M['m00'])
+                else:
+                    cx, cy = 0, 0
+
+                if len(p1_cnt) > 0:
+                    # a, b = p1_cnt[0].ravel()
+                    cv2.putText(images[i], f'{idx + 1}', (cx - 1, cy - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255),1)
+
+            # 保存当前帧的位移值
+            displacement_values.append(frame_displacements)
+
+            # 将位移值写入文件
+            file.write(f"Frame {i + 1}:\n")
+            for j, (displacement, x_disp, y_disp, angle) in enumerate(frame_displacements):
+                file.write(f"  Contour {j + 1}: Avg Displacement: {displacement:.2f}, X: {x_disp:.2f}, Y: {y_disp:.2f}, Angle: {angle:.2f} degrees\n")
+
+            # 叠加原图和轨迹图
+            img = cv2.add(images[i], mask)
+
+            # 显示图像
+            cv2.imshow('Optical Flow', img)
+            cv2.waitKey(30)  # 等待30毫秒
+
+            # 更新追踪点
+            initial_points = current_points
+
+            # 写入视频
+            video_writer.write(img)
+
+            # 显示图像
+            cv2.imshow('Optical Flow', img)
+            cv2.waitKey(30)  # 等待30毫秒
+
+            # 更新追踪点
+            initial_points = current_points
+
+
+    # 释放视频写入对象
+    video_writer.release()
+    cv2.destroyAllWindows()
+
+
+    # 输出位移值
+    for i, frame_displacements in enumerate(displacement_values):
+        print(f"Frame {i + 1}:")
+        for j, (displacement, x_disp, y_disp, angle) in enumerate(frame_displacements):
+            print(f"  Contour {j + 1}: Avg Displacement: {displacement:.2f}")
+
+# 主函数
+if __name__ == "__main__":
+    # 加载图像序列
+    folder = './frame'
+    images = load_images_from_folder(folder)
+
+    # 计算光流并显示效果图像
+    calculate_and_show_optical_flow(images)
